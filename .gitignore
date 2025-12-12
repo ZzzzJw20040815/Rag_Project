@@ -1,0 +1,8 @@
+/.env
+/.vscode
+/data
+/lib
+/venv
+/__pycache__
+/【技术约束与最佳实践指南】.md
+/毕设详细流程.md
