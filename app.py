@@ -25,12 +25,14 @@ from ui import (
     render_source_documents,
     render_sidebar_api_config,
     render_sidebar_info,
-    render_quick_questions
+    render_quick_questions,
+    render_chat_qa_item
 )
 from ui.graph_view import (
     render_graph_in_streamlit,
     render_graph_statistics,
-    render_legend
+    render_legend,
+    render_entity_source_buttons
 )
 
 
@@ -126,13 +128,14 @@ def process_uploaded_files(uploaded_files, api_key: str):
                 st.error(f"❌ 创建向量索引时出错: {str(e)}")
 
 
-def handle_question(question: str, api_key: str):
+def handle_question(question: str, api_key: str, selected_docs: list = None):
     """
     处理用户问题
     
     Args:
         question: 用户问题
         api_key: API Key
+        selected_docs: 选中的文档名称列表（用于过滤检索范围）
     """
     if not question.strip():
         return
@@ -143,8 +146,16 @@ def handle_question(question: str, api_key: str):
     
     with st.spinner("🤔 正在思考..."):
         try:
-            # 获取检索器
-            retriever = st.session_state.vector_store_manager.as_retriever()
+            # 获取检索器（根据是否有文档选择决定是否过滤）
+            all_doc_names = [d.get("name") for d in st.session_state.uploaded_files_info]
+            
+            # 判断是否需要过滤：只有当选择了部分文档时才过滤
+            if selected_docs and set(selected_docs) != set(all_doc_names):
+                # 用户选择了部分文档，使用过滤检索器
+                retriever = st.session_state.vector_store_manager.as_retriever_filtered(selected_docs)
+            else:
+                # 全选或未指定，使用普通检索器
+                retriever = st.session_state.vector_store_manager.as_retriever()
             
             # 创建 RAG 链
             rag_chain = RAGChain(retriever, api_key=api_key)
@@ -152,11 +163,12 @@ def handle_question(question: str, api_key: str):
             # 执行查询
             result = rag_chain.query(question)
             
-            # 保存到历史记录
+            # 保存到历史记录（包含选中的文档信息）
             st.session_state.chat_history.append({
                 "question": question,
                 "answer": result["answer"],
-                "sources": result["sources"]
+                "sources": result["sources"],
+                "selected_docs": selected_docs or []  # 保存提问时选择的文档
             })
             
             # 清空输入框
@@ -206,16 +218,20 @@ def render_chat_interface(api_key: str):
     """
     st.subheader("💬 智能问答")
     
-    # 渲染历史消息
-    for chat in st.session_state.chat_history:
-        render_chat_message("user", chat["question"])
-        render_chat_message("assistant", chat["answer"])
-        render_source_documents(chat.get("sources", []))
+    # 渲染历史消息（可折叠，最新的默认展开）
+    chat_count = len(st.session_state.chat_history)
+    for i, chat in enumerate(st.session_state.chat_history):
+        is_latest = (i == chat_count - 1)  # 最新的问答默认展开
+        render_chat_qa_item(chat, index=i, is_latest=is_latest)
     
     # 问答输入区
     if st.session_state.documents_loaded and api_key:
-        # 快捷问题
-        quick_q = render_quick_questions()
+        # 快捷问题（传入文档信息以支持多文献场景）
+        quick_q, selected_docs = render_quick_questions(st.session_state.uploaded_files_info)
+        
+        # 始终保存当前选中的文档（用于手动输入时的检索过滤）
+        st.session_state.selected_docs_for_qa = selected_docs
+        
         if quick_q:
             st.session_state.current_question = quick_q
             # 强制刷新以更新输入框
@@ -242,7 +258,9 @@ def render_chat_interface(api_key: str):
         col1, col2 = st.columns([1, 5])
         with col1:
             if st.button("🔍 提问", use_container_width=True):
-                handle_question(question, api_key)
+                # 获取当前选中的文档（来自快捷问题选择器或默认全选）
+                selected = st.session_state.get("selected_docs_for_qa", None)
+                handle_question(question, api_key, selected)
         with col2:
             if st.button("🗑️ 清除对话", use_container_width=True):
                 st.session_state.chat_history = []
@@ -366,14 +384,19 @@ def main():
                 render_graph_statistics(stats)
                 
                 st.markdown("---")
-                st.markdown("### 📊 交互式论文地图")
-                st.caption("提示：可拖拽节点，悬停查看详情")
                 
-                # 渲染图谱
+                # 实体来源追溯功能
+                render_entity_source_buttons(stats, st.session_state.knowledge_graph)
+                
+                st.markdown("---")
+                st.markdown("### 📊 交互式论文地图")
+                st.caption("提示：可拖拽节点，悬停查看详情，点击节点查看连接关系")
+                
+                # 渲染图谱 (使用默认高度750)
                 render_graph_in_streamlit(
                     st.session_state.knowledge_graph.graph,
-                    height=550,
-                    key="main_knowledge_graph"
+                    key="main_knowledge_graph",
+                    doc_entity_map=stats.get("document_entities", {})
                 )
     
     # 底部信息

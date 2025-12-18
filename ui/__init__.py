@@ -199,11 +199,22 @@ def markdown_to_html(text: str) -> str:
     # 行内格式转换
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)  # 粗体
     text = re.sub(r'(?<!\*)\*([^*\n]+?)\*(?!\*)', r'<em>\1</em>', text)  # 斜体
-    text = re.sub(
-        r'`([^`]+?)`',
-        r'<code style="background: rgba(0,0,0,0.1); padding: 2px 4px; border-radius: 3px;">\1</code>',
-        text
-    )  # 行内代码
+    # 行内代码：跳过空内容、纯符号、或过短的内容，避免灰色方块
+    def process_inline_code(match):
+        content = match.group(1)
+        # 跳过空白内容
+        if not content.strip():
+            return content
+        # 跳过纯符号内容（如 `...` `、` 等）
+        if re.match(r'^[.\s,，、。！？：；\-—_\u2026]+$', content):
+            return content
+        # 跳过过短的无意义内容
+        if len(content.strip()) <= 1 and not content.strip().isalnum():
+            return content
+        # 正常渲染有意义的代码
+        return f'<code style="background: rgba(0,0,0,0.1); padding: 2px 4px; border-radius: 3px;">{content}</code>'
+    
+    text = re.sub(r'`([^`]*?)`', process_inline_code, text)
     
     # 链接转换 [text](url)
     text = re.sub(
@@ -240,17 +251,19 @@ def render_chat_message(role: str, content: str):
         )
 
 
-def render_source_documents(sources: list):
+def render_source_documents(sources: list, use_expander: bool = True):
     """
     渲染来源文档
     
     Args:
         sources: 来源文档列表，每个元素包含 content, page, source_file
+        use_expander: 是否使用 expander 包裹（在已有 expander 内调用时设为 False）
     """
     if not sources:
         return
     
-    with st.expander("📚 查看引用来源", expanded=False):
+    def render_sources_content():
+        """渲染来源内容的内部函数"""
         # 每行 2 个来源
         for row_start in range(0, len(sources), 2):
             row_sources = sources[row_start:row_start + 2]
@@ -265,6 +278,52 @@ def render_source_documents(sources: list):
                     
                     st.markdown(f"**📄 来源 {i}** · {file_name} · 第 {page_num} 页")
                     st.info(content + "..." if len(source.get('content', '')) > 400 else content)
+    
+    if use_expander:
+        with st.expander("📚 查看引用来源", expanded=False):
+            render_sources_content()
+    else:
+        st.markdown("---")
+        st.markdown("**📚 引用来源详情：**")
+        render_sources_content()
+
+
+def render_chat_qa_item(chat: dict, index: int, is_latest: bool = False):
+    """
+    渲染单个问答项（可折叠）
+    
+    Args:
+        chat: 包含 question, answer, sources, selected_docs 的字典
+        index: 问答索引（用于生成唯一 key）
+        is_latest: 是否是最新的问答（最新的默认展开）
+    """
+    question = chat.get("question", "")
+    answer = chat.get("answer", "")
+    sources = chat.get("sources", [])
+    selected_docs = chat.get("selected_docs", [])
+    
+    # 生成问题预览（用于折叠标题）
+    question_preview = question[:30] + "..." if len(question) > 30 else question
+    
+    # 创建可折叠的问答容器
+    with st.expander(f"💬 {question_preview}", expanded=is_latest):
+        # 显示引用的文献来源标签
+        if selected_docs:
+            doc_labels = " · ".join([f"📄 {d}" for d in selected_docs])
+            st.markdown(
+                f'<div style="background: linear-gradient(90deg, #667eea20, #764ba220); '
+                f'padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; '
+                f'font-size: 0.85em; color: #666;">'
+                f'<strong>📚 引用文献：</strong>{doc_labels}</div>',
+                unsafe_allow_html=True
+            )
+        
+        # 渲染问题和回答
+        render_chat_message("user", question)
+        render_chat_message("assistant", answer)
+        
+        # 渲染详细引用来源（不使用 expander，因为已在 expander 内）
+        render_source_documents(sources, use_expander=False)
 
 
 def get_custom_css() -> str:
@@ -534,28 +593,131 @@ def render_sidebar_info():
     """)
 
 
-def render_quick_questions():
+def render_quick_questions(docs_info: list = None):
     """
     渲染快捷问题按钮
     
-    Returns:
-        选中的问题，如果没有选中则返回 None
-    """
-    st.markdown("**💡 快捷问题:**")
+    Args:
+        docs_info: 已上传的文档信息列表 [{"name": "文件名", ...}, ...]
     
-    questions = [
+    Returns:
+        (selected_question, selected_docs): 选中的问题和选中的文档名称列表
+    """
+    # 单文献问题
+    single_doc_questions = [
         "这篇文档的主要内容是什么？",
         "文档中提到了哪些关键概念？",
         "总结一下文档的核心观点",
         "文档使用了哪些研究方法？"
     ]
     
-    cols = st.columns(len(questions))
-    selected = None
+    # 多文献问题
+    multi_doc_questions = [
+        "这些文献的共同主题是什么？",
+        "各文献的研究方法有何异同？",
+        "总结各文献的核心观点及关联",
+        "这些文献在该领域的发展脉络？"
+    ]
+    
+    docs_info = docs_info or []
+    num_docs = len(docs_info)
+    selected_question = None
+    selected_docs = []
+    
+    # 多文献场景：显示文献选择器
+    if num_docs >= 2:
+        st.markdown("**📂 选择分析范围:**")
+        
+        # 初始化 session state 用于保存选择状态
+        if "selected_doc_indices" not in st.session_state:
+            st.session_state.selected_doc_indices = list(range(num_docs))  # 默认全选
+        
+        # 创建选择器布局
+        selector_cols = st.columns([3, 1])
+        
+        with selector_cols[0]:
+            # 使用 multiselect 让用户选择文档
+            doc_names = [d.get("name", f"文档{i+1}") for i, d in enumerate(docs_info)]
+            
+            # 获取当前选中的文档名称
+            default_selected = [doc_names[i] for i in st.session_state.selected_doc_indices 
+                               if i < len(doc_names)]
+            
+            selected_doc_names = st.multiselect(
+                "选择要分析的文献（可多选）",
+                options=doc_names,
+                default=default_selected,
+                key="doc_selector",
+                placeholder="请选择文献...",
+                label_visibility="collapsed"
+            )
+            
+            # 更新 session state
+            st.session_state.selected_doc_indices = [doc_names.index(n) for n in selected_doc_names]
+            selected_docs = selected_doc_names
+        
+        with selector_cols[1]:
+            # 快捷操作按钮
+            if st.button("全选", key="select_all_docs", use_container_width=True):
+                st.session_state.selected_doc_indices = list(range(num_docs))
+                st.rerun()
+        
+        # 显示选择状态提示
+        if len(selected_docs) == 0:
+            st.warning("⚠️ 请至少选择一篇文献")
+            return None, []
+        elif len(selected_docs) == 1:
+            st.caption(f"📄 已选择 1 篇文献，显示单文献问题")
+            questions = single_doc_questions
+        else:
+            st.caption(f"📚 已选择 {len(selected_docs)} 篇文献，显示多文献对比问题")
+            questions = multi_doc_questions
+    else:
+        # 单文献场景
+        questions = single_doc_questions
+        if docs_info:
+            selected_docs = [docs_info[0].get("name", "文档1")]
+    
+    # 添加自定义 CSS 让按钮文字可以换行显示 + 文档选择器完整显示
+    st.markdown("""
+    <style>
+        /* 快捷问题按钮换行 */
+        div[data-testid="stHorizontalBlock"] .stButton > button {
+            white-space: normal !important;
+            word-wrap: break-word !important;
+            height: auto !important;
+            min-height: 45px !important;
+            padding: 8px 12px !important;
+            line-height: 1.3 !important;
+        }
+        
+        /* 文档选择器：完整显示文档名称 */
+        div[data-testid="stMultiSelect"] span[data-baseweb="tag"] {
+            max-width: none !important;
+        }
+        div[data-testid="stMultiSelect"] span[data-baseweb="tag"] span {
+            max-width: none !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+        }
+        /* 下拉选项也完整显示 */
+        ul[role="listbox"] li {
+            white-space: normal !important;
+            word-wrap: break-word !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("**💡 快捷问题:**")
+    
+    # 使用 2x2 布局让问题更好地显示
+    row1_cols = st.columns(2)
+    row2_cols = st.columns(2)
+    all_cols = row1_cols + row2_cols
     
     for i, q in enumerate(questions):
-        with cols[i]:
-            if st.button(q[:8] + "...", key=f"quick_q_{i}", use_container_width=True):
-                selected = q
+        with all_cols[i]:
+            if st.button(q, key=f"quick_q_{i}", use_container_width=True):
+                selected_question = q
     
-    return selected
+    return selected_question, selected_docs

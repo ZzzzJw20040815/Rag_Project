@@ -57,6 +57,81 @@ class KnowledgeGraph:
             "fields": {},
             "applications": {}
         }
+        
+        # 实体规范化映射：基础名称(小写) -> 规范形式
+        # 用于合并相同基础名称但不同注释的实体
+        self._entity_canonical_forms: Dict[str, str] = {}
+    
+    def _extract_base_name(self, entity_name: str) -> str:
+        """
+        提取实体的基础名称（括号前的部分）
+        
+        例如:
+        - "OLAF (OLAF方法)" -> "olaf"
+        - "OLAF (在线学习与反馈)" -> "olaf"
+        - "Large Language Model (大语言模型)" -> "large language model"
+        """
+        import re
+        # 匹配第一个括号前的内容
+        match = re.match(r'^([^(\[（【]+)', entity_name)
+        if match:
+            return match.group(1).strip().lower()
+        return entity_name.strip().lower()
+    
+    def _normalize_entity(self, entity_name: str) -> str:
+        """
+        实体归一化处理：合并相同基础名称的实体
+        
+        规则：
+        1. 提取基础名称（括号前的部分）
+        2. 如果已存在相同基础名称，比较并保留注释更完整的版本
+        3. 优先保留包含中文注释且最长的版本
+        
+        Args:
+            entity_name: 原始实体名称
+            
+        Returns:
+            归一化后的实体名称
+        """
+        if not entity_name:
+            return entity_name
+        
+        # 去除首尾空格
+        entity_name = entity_name.strip()
+        
+        # 提取基础名称作为键
+        base_name = self._extract_base_name(entity_name)
+        
+        if base_name in self._entity_canonical_forms:
+            # 已存在相同基础名称的实体
+            existing = self._entity_canonical_forms[base_name]
+            
+            # 比较并保留更完整的版本
+            # 优先级: 1) 包含中文 2) 更长 3) 包含括号注释
+            def score(name):
+                """计算实体名称的完整性分数"""
+                score = 0
+                # 包含中文加分
+                if any('\u4e00' <= c <= '\u9fff' for c in name):
+                    score += 100
+                # 包含括号注释加分
+                if '(' in name or '（' in name:
+                    score += 50
+                # 长度加分（但不能太长）
+                score += min(len(name), 80)
+                return score
+            
+            if score(entity_name) > score(existing):
+                # 新版本更完整，更新规范形式
+                self._entity_canonical_forms[base_name] = entity_name
+                return entity_name
+            else:
+                # 使用已有的规范形式
+                return existing
+        else:
+            # 新实体，将当前形式作为规范形式
+            self._entity_canonical_forms[base_name] = entity_name
+            return entity_name
     
     def add_document(
         self,
@@ -73,8 +148,15 @@ class KnowledgeGraph:
         # 清理文档名（移除路径，只保留文件名）
         doc_name = Path(doc_name).stem if "/" in doc_name or "\\" in doc_name else doc_name
         
-        # 存储文档实体映射
-        self._document_entities[doc_name] = entities
+        # 归一化所有实体（合并大小写差异）
+        normalized_entities = {}
+        for entity_type, entity_list in entities.items():
+            normalized_list = [self._normalize_entity(e) for e in entity_list if e]
+            # 去重（同一文档内）
+            normalized_entities[entity_type] = list(dict.fromkeys(normalized_list))
+        
+        # 存储文档实体映射（使用归一化后的实体）
+        self._document_entities[doc_name] = normalized_entities
         
         # 添加文档节点
         self.graph.add_node(
@@ -85,7 +167,7 @@ class KnowledgeGraph:
         )
         
         # 添加关键词节点和边
-        for keyword in entities.get("keywords", []):
+        for keyword in normalized_entities.get("keywords", []):
             self._add_entity_node(keyword, NODE_TYPE_KEYWORD)
             self.graph.add_edge(
                 doc_name, keyword,
@@ -96,7 +178,7 @@ class KnowledgeGraph:
                 self._entity_counts["keywords"].get(keyword, 0) + 1
         
         # 添加方法节点和边
-        for method in entities.get("methods", []):
+        for method in normalized_entities.get("methods", []):
             self._add_entity_node(method, NODE_TYPE_METHOD)
             self.graph.add_edge(
                 doc_name, method,
@@ -107,7 +189,7 @@ class KnowledgeGraph:
                 self._entity_counts["methods"].get(method, 0) + 1
         
         # 添加数据集节点和边
-        for dataset in entities.get("datasets", []):
+        for dataset in normalized_entities.get("datasets", []):
             self._add_entity_node(dataset, NODE_TYPE_DATASET)
             self.graph.add_edge(
                 doc_name, dataset,
@@ -118,7 +200,7 @@ class KnowledgeGraph:
                 self._entity_counts["datasets"].get(dataset, 0) + 1
         
         # 添加研究领域节点和边
-        for field in entities.get("fields", []):
+        for field in normalized_entities.get("fields", []):
             self._add_entity_node(field, NODE_TYPE_FIELD)
             self.graph.add_edge(
                 doc_name, field,
@@ -129,7 +211,7 @@ class KnowledgeGraph:
                 self._entity_counts["fields"].get(field, 0) + 1
         
         # 添加应用场景节点和边
-        for app in entities.get("applications", []):
+        for app in normalized_entities.get("applications", []):
             self._add_entity_node(app, NODE_TYPE_APPLICATION)
             self.graph.add_edge(
                 doc_name, app,
@@ -256,6 +338,75 @@ class KnowledgeGraph:
         
         return sorted_related
     
+    def get_entity_sources(self, entity_name: str) -> List[str]:
+        """
+        获取某个实体来自哪些文献
+        
+        Args:
+            entity_name: 实体名称
+            
+        Returns:
+            包含该实体的文档名称列表
+        """
+        sources = []
+        for doc_name, entities in self._document_entities.items():
+            # 检查所有实体类型
+            all_entities = []
+            for entity_list in entities.values():
+                all_entities.extend(entity_list)
+            if entity_name in all_entities:
+                sources.append(doc_name)
+        return sources
+    
+    def _rebuild_canonical_forms(self) -> None:
+        """
+        从 document_entities 重新构建实体规范化映射
+        用于加载没有保存 canonical_forms 的旧版图谱
+        """
+        self._entity_canonical_forms = {}
+        
+        # 收集所有实体
+        all_entities = []
+        for doc_entities in self._document_entities.values():
+            for entity_list in doc_entities.values():
+                all_entities.extend(entity_list)
+        
+        # 按照归一化规则处理每个实体
+        for entity in all_entities:
+            base_name = self._extract_base_name(entity)
+            
+            if base_name in self._entity_canonical_forms:
+                existing = self._entity_canonical_forms[base_name]
+                # 评分函数：优先保留更完整的版本
+                def score(name):
+                    s = 0
+                    if any('\u4e00' <= c <= '\u9fff' for c in name):
+                        s += 100  # 包含中文
+                    if '(' in name or '（' in name:
+                        s += 50   # 包含括号注释
+                    s += min(len(name), 80)  # 长度
+                    return s
+                
+                if score(entity) > score(existing):
+                    self._entity_canonical_forms[base_name] = entity
+            else:
+                self._entity_canonical_forms[base_name] = entity
+        
+        print(f"🔄 已重建实体规范化映射: {len(self._entity_canonical_forms)} 个基础实体")
+    
+    def get_all_entities_by_type(self, entity_type: str) -> List[Tuple[str, int]]:
+        """
+        获取指定类型的所有实体及其出现次数
+        
+        Args:
+            entity_type: 实体类型 (keywords, methods, datasets, fields, applications)
+            
+        Returns:
+            [(实体名称, 出现次数)] 列表，按次数降序排列
+        """
+        counts = self._entity_counts.get(entity_type, {})
+        return sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    
     def get_statistics(self) -> Dict[str, Any]:
         """
         获取图谱统计信息
@@ -283,6 +434,17 @@ class KnowledgeGraph:
             self._entity_counts["fields"].items(),
             key=lambda x: x[1], reverse=True
         )[:3]
+        top_datasets = sorted(
+            self._entity_counts["datasets"].items(),
+            key=lambda x: x[1], reverse=True
+        )[:5]
+        
+        # 获取所有实体完整列表
+        all_keywords = self.get_all_entities_by_type("keywords")
+        all_methods = self.get_all_entities_by_type("methods")
+        all_datasets = self.get_all_entities_by_type("datasets")
+        all_fields = self.get_all_entities_by_type("fields")
+        all_applications = self.get_all_entities_by_type("applications")
         
         return {
             "total_nodes": self.graph.number_of_nodes(),
@@ -296,7 +458,16 @@ class KnowledgeGraph:
             "top_keywords": top_keywords,
             "top_methods": top_methods,
             "top_fields": top_fields,
-            "documents": doc_nodes
+            "top_datasets": top_datasets,
+            "documents": doc_nodes,
+            # 完整实体列表
+            "all_keywords": all_keywords,
+            "all_methods": all_methods,
+            "all_datasets": all_datasets,
+            "all_fields": all_fields,
+            "all_applications": all_applications,
+            # 文档-实体映射 (用于查询实体来源)
+            "document_entities": self._document_entities
         }
     
     def save(self, filepath: Optional[str] = None) -> str:
@@ -330,7 +501,8 @@ class KnowledgeGraph:
                 for u, v, attrs in self.graph.edges(data=True)
             ],
             "document_entities": self._document_entities,
-            "entity_counts": self._entity_counts
+            "entity_counts": self._entity_counts,
+            "entity_canonical_forms": self._entity_canonical_forms  # 保存实体规范化映射
         }
         
         # 确保目录存在
@@ -380,8 +552,16 @@ class KnowledgeGraph:
             # 恢复元数据
             self._document_entities = data.get("document_entities", {})
             self._entity_counts = data.get("entity_counts", {
-                "keywords": {}, "methods": {}, "datasets": {}
+                "keywords": {}, "methods": {}, "datasets": {},
+                "fields": {}, "applications": {}
             })
+            
+            # 恢复实体规范化映射
+            self._entity_canonical_forms = data.get("entity_canonical_forms", {})
+            
+            # 如果没有保存的 canonical_forms，则从 document_entities 重新构建
+            if not self._entity_canonical_forms:
+                self._rebuild_canonical_forms()
             
             print(f"✅ 图谱已加载: {self.graph.number_of_nodes()} 节点, {self.graph.number_of_edges()} 边")
             return True
@@ -394,6 +574,7 @@ class KnowledgeGraph:
         """清空图谱"""
         self.graph.clear()
         self._document_entities.clear()
+        self._entity_canonical_forms.clear()
         self._entity_counts = {
             "keywords": {}, "methods": {}, "datasets": {},
             "fields": {}, "applications": {}

@@ -171,7 +171,17 @@ class DocumentProcessor:
     def clean_text(self, text: str) -> str:
         """
         清洗文本：移除参考文献、致谢、页眉页脚等噪音
+        同时处理 PDF 解析可能产生的无效 Unicode 字符
         """
+        # ★ 移除无效的 Unicode 代理字符（surrogates）
+        # PDF 解析有时会产生这些非法字符，导致 UTF-8 编码失败
+        # 使用 surrogatepass 编码后再用 ignore 解码，可以安全移除这些字符
+        try:
+            text = text.encode('utf-8', 'surrogatepass').decode('utf-8', 'ignore')
+        except Exception:
+            # 如果上面的方法失败，尝试备用方案
+            text = text.encode('utf-8', 'ignore').decode('utf-8', 'ignore')
+        
         # 移除常见的页眉页脚模式
         text = re.sub(r'第\s*\d+\s*页', '', text)
         text = re.sub(r'(?i)page\s*\d+\s*(of\s*\d+)?', '', text)

@@ -201,6 +201,47 @@ class VectorStoreManager:
         
         return self._vector_store.as_retriever(**default_kwargs)
     
+    def as_retriever_filtered(self, source_files: List[str], **kwargs):
+        """
+        获取带文件过滤的检索器对象
+        
+        Args:
+            source_files: 要检索的文件名列表
+            **kwargs: 传递给 as_retriever 的其他参数
+            
+        Returns:
+            带过滤的 Retriever 对象
+        """
+        if self._vector_store is None:
+            raise ValueError("向量存储未初始化，请先添加文档")
+        
+        if not source_files:
+            # 如果没有指定文件，返回普通检索器
+            return self.as_retriever(**kwargs)
+        
+        # 构建 ChromaDB 的 where 过滤条件
+        # 使用 $in 操作符匹配多个文件名
+        if len(source_files) == 1:
+            filter_condition = {"source_file": source_files[0]}
+        else:
+            filter_condition = {"source_file": {"$in": source_files}}
+        
+        # 默认参数
+        default_kwargs = {
+            "search_type": "similarity",
+            "search_kwargs": {
+                "k": RETRIEVAL_K,
+                "filter": filter_condition
+            }
+        }
+        
+        # 合并用户提供的 search_kwargs
+        if "search_kwargs" in kwargs:
+            default_kwargs["search_kwargs"].update(kwargs.pop("search_kwargs"))
+        default_kwargs.update(kwargs)
+        
+        return self._vector_store.as_retriever(**default_kwargs)
+    
     def clear(self):
         """清空向量存储"""
         import gc
