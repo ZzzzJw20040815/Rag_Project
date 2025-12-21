@@ -31,8 +31,8 @@ from ui import (
 from ui.graph_view import (
     render_graph_in_streamlit,
     render_graph_statistics,
-    render_legend,
-    render_entity_source_buttons
+    render_legend
+    # [REMOVED] render_entity_source_buttons - 如需恢复，取消注释并取消下方调用处的注释
 )
 
 
@@ -48,8 +48,8 @@ def init_session_state():
         st.session_state.uploaded_files_info = []
     if "api_key" not in st.session_state:
         st.session_state.api_key = get_api_key()
-    if "current_question" not in st.session_state:
-        st.session_state.current_question = ""
+    if "pending_quick_question" not in st.session_state:
+        st.session_state.pending_quick_question = None
     # 知识图谱相关状态
     if "knowledge_graph" not in st.session_state:
         st.session_state.knowledge_graph = KnowledgeGraph()
@@ -171,8 +171,6 @@ def handle_question(question: str, api_key: str, selected_docs: list = None):
                 "selected_docs": selected_docs or []  # 保存提问时选择的文档
             })
             
-            # 清空输入框
-            st.session_state.current_question = ""
             
             # 刷新页面以显示新消息
             st.rerun()
@@ -211,61 +209,53 @@ def render_document_status():
 
 def render_chat_interface(api_key: str):
     """
-    渲染聊天界面
+    渲染聊天界面（使用原生 st.chat_message 和 st.chat_input）
     
     Args:
         api_key: API Key
     """
     st.subheader("💬 智能问答")
     
-    # 渲染历史消息（可折叠，最新的默认展开）
-    chat_count = len(st.session_state.chat_history)
+    # 检查是否有待处理的快捷问题
+    if "pending_quick_question" in st.session_state and st.session_state.pending_quick_question:
+        pending_q = st.session_state.pending_quick_question
+        selected = st.session_state.get("selected_docs_for_qa", None)
+        st.session_state.pending_quick_question = None  # 清除待处理问题
+        handle_question(pending_q, api_key, selected)
+    
+    # 渲染历史消息（使用原生 chat_message 组件）
     for i, chat in enumerate(st.session_state.chat_history):
-        is_latest = (i == chat_count - 1)  # 最新的问答默认展开
-        render_chat_qa_item(chat, index=i, is_latest=is_latest)
+        render_chat_qa_item(chat, index=i, is_latest=(i == len(st.session_state.chat_history) - 1))
     
     # 问答输入区
     if st.session_state.documents_loaded and api_key:
-        # 快捷问题（传入文档信息以支持多文献场景）
-        quick_q, selected_docs = render_quick_questions(st.session_state.uploaded_files_info)
-        
-        # 始终保存当前选中的文档（用于手动输入时的检索过滤）
-        st.session_state.selected_docs_for_qa = selected_docs
-        
-        if quick_q:
-            st.session_state.current_question = quick_q
-            # 强制刷新以更新输入框
-            st.rerun()
+        # 快捷问题区域（放在聊天消息和输入框之间）
+        with st.container():
+            quick_q, selected_docs = render_quick_questions(st.session_state.uploaded_files_info)
+            
+            # 保存当前选中的文档（用于检索过滤）
+            st.session_state.selected_docs_for_qa = selected_docs
+            
+            # 如果点击了快捷问题，保存到 pending 状态并刷新
+            if quick_q:
+                st.session_state.pending_quick_question = quick_q
+                st.rerun()
         
         st.markdown("---")
         
-        # 输入框
-        # 使用 callback 会更好，但这里简单起见，利用 session_state 绑定
-        if "current_question" not in st.session_state:
-            st.session_state.current_question = ""
-            
-        question = st.text_input(
-            "输入你的问题",
-            value=st.session_state.current_question,
-            placeholder="请输入关于文档的问题...",
-            key="question_input"
-        )
-        
-        # 输入框的值变化时，可能会更新 key 对应的 state，但不会自动同步到 current_question
-        # 所以我们需要把 input 的值回写到 logic state (如果需要的话)
-        # 但这里主要就是为了让 quick_q 点击后填充进去。
-        
-        col1, col2 = st.columns([1, 5])
-        with col1:
-            if st.button("🔍 提问", use_container_width=True):
-                # 获取当前选中的文档（来自快捷问题选择器或默认全选）
-                selected = st.session_state.get("selected_docs_for_qa", None)
-                handle_question(question, api_key, selected)
+        # 清除对话按钮（放在输入框上方）
+        col1, col2 = st.columns([5, 1])
         with col2:
             if st.button("🗑️ 清除对话", use_container_width=True):
                 st.session_state.chat_history = []
-                st.session_state.current_question = ""
                 st.rerun()
+        
+        # 使用原生 st.chat_input 替代 text_input + button
+        # chat_input 自动固定在页面底部，支持 Enter 提交
+        if question := st.chat_input("输入你的问题...", key="chat_input"):
+            # 获取当前选中的文档
+            selected = st.session_state.get("selected_docs_for_qa", None)
+            handle_question(question, api_key, selected)
                 
     elif not st.session_state.documents_loaded:
         st.info("👆 请先上传并处理文档")
@@ -383,12 +373,10 @@ def main():
                 stats = st.session_state.knowledge_graph.get_statistics()
                 render_graph_statistics(stats)
                 
-                st.markdown("---")
+                # [REMOVED] 实体来源追溯功能 - 如需恢复，取消以下注释：
+                # render_entity_source_buttons(stats, st.session_state.knowledge_graph)
                 
-                # 实体来源追溯功能
-                render_entity_source_buttons(stats, st.session_state.knowledge_graph)
-                
-                st.markdown("---")
+                # st.markdown("---")
                 st.markdown("### 📊 交互式论文地图")
                 st.caption("提示：可拖拽节点，悬停查看详情，点击节点查看连接关系")
                 

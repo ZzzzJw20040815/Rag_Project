@@ -231,24 +231,25 @@ def markdown_to_html(text: str) -> str:
     return text
 
 
-def render_chat_message(role: str, content: str):
+def render_chat_message(role: str, content: str, use_container: bool = True):
     """
-    渲染聊天消息
+    使用 Streamlit 原生 st.chat_message 渲染聊天消息
     
     Args:
         role: 角色 ("user" 或 "assistant")
         content: 消息内容
+        use_container: 是否使用 chat_message 容器（在已有容器内可设为 False）
     """
-    if role == "user":
-        st.markdown(
-            f'<div class="chat-message user-message">🧑 <strong>用户</strong>: {markdown_to_html(content)}</div>',
-            unsafe_allow_html=True
-        )
+    # 映射角色到 Streamlit 支持的角色名
+    avatar = "🧑" if role == "user" else "🤖"
+    
+    if use_container:
+        with st.chat_message(role, avatar=avatar):
+            # st.chat_message 内部原生支持 Markdown，直接使用 st.markdown
+            st.markdown(content)
     else:
-        st.markdown(
-            f'<div class="chat-message assistant-message">🤖 <strong>助手</strong>: {markdown_to_html(content)}</div>',
-            unsafe_allow_html=True
-        )
+        # 不使用容器时，直接渲染 markdown（用于嵌套场景）
+        st.markdown(f"**{'用户' if role == 'user' else '助手'}:** {content}")
 
 
 def render_source_documents(sources: list, use_expander: bool = True):
@@ -290,7 +291,7 @@ def render_source_documents(sources: list, use_expander: bool = True):
 
 def render_chat_qa_item(chat: dict, index: int, is_latest: bool = False):
     """
-    渲染单个问答项（可折叠）
+    渲染单个问答项（使用原生 st.chat_message 组件）
     
     Args:
         chat: 包含 question, answer, sources, selected_docs 的字典
@@ -302,28 +303,29 @@ def render_chat_qa_item(chat: dict, index: int, is_latest: bool = False):
     sources = chat.get("sources", [])
     selected_docs = chat.get("selected_docs", [])
     
-    # 生成问题预览（用于折叠标题）
-    question_preview = question[:30] + "..." if len(question) > 30 else question
+    # 显示引用的文献来源标签（在消息外部显示）
+    if selected_docs:
+        doc_labels = " · ".join([f"📄 {d}" for d in selected_docs])
+        # 使用能同时适配浅色和深色模式的样式
+        st.markdown(
+            f'<div style="background: linear-gradient(90deg, rgba(102,126,234,0.15), rgba(118,75,162,0.15)); '
+            f'padding: 8px 12px; border-radius: 8px; margin-bottom: 8px; '
+            f'font-size: 0.85em; border: 1px solid rgba(102,126,234,0.3);">'
+            f'<strong>📚 引用文献：</strong>{doc_labels}</div>',
+            unsafe_allow_html=True
+        )
     
-    # 创建可折叠的问答容器
-    with st.expander(f"💬 {question_preview}", expanded=is_latest):
-        # 显示引用的文献来源标签
-        if selected_docs:
-            doc_labels = " · ".join([f"📄 {d}" for d in selected_docs])
-            st.markdown(
-                f'<div style="background: linear-gradient(90deg, #667eea20, #764ba220); '
-                f'padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; '
-                f'font-size: 0.85em; color: #666;">'
-                f'<strong>📚 引用文献：</strong>{doc_labels}</div>',
-                unsafe_allow_html=True
-            )
+    # 使用原生 st.chat_message 渲染问题
+    with st.chat_message("user", avatar="🧑"):
+        st.markdown(question)
+    
+    # 使用原生 st.chat_message 渲染回答
+    with st.chat_message("assistant", avatar="🤖"):
+        st.markdown(answer)
         
-        # 渲染问题和回答
-        render_chat_message("user", question)
-        render_chat_message("assistant", answer)
-        
-        # 渲染详细引用来源（不使用 expander，因为已在 expander 内）
-        render_source_documents(sources, use_expander=False)
+        # 在助手消息内部显示引用来源（使用 expander 折叠）
+        if sources:
+            render_source_documents(sources, use_expander=True)
 
 
 def get_custom_css() -> str:

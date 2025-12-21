@@ -41,7 +41,7 @@ SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 # LLM 模型配置
 LLM_MODEL = "deepseek-ai/DeepSeek-V3.2"  # 硅基流动上的 DeepSeek 模型
 LLM_TEMPERATURE = 0.7
-LLM_MAX_TOKENS = 4096
+LLM_MAX_TOKENS = 8192
 
 # Embedding 模型配置
 EMBEDDING_MODEL = "BAAI/bge-m3"  # 中英文双语兼容的 Embedding 模型

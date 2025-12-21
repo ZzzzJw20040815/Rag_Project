@@ -88,6 +88,35 @@ D3_TEMPLATE = """
         .dimmed { opacity: 0.1; }
         .highlighted { stroke: #fcd34d; stroke-width: 2px; stroke-opacity: 1; }
         
+        /* 桥梁节点样式 - 连接多个文献的重要节点 */
+        .bridge-node .bridge-glow {
+            animation: bridgePulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes bridgePulse {
+            0%, 100% { 
+                opacity: 0.3;
+                r: attr(r);
+            }
+            50% { 
+                opacity: 0.6;
+            }
+        }
+        
+        /* 桥梁边样式 - 连接桥梁节点和文献的边 */
+        .bridge-link {
+            stroke: #fbbf24 !important;
+            stroke-opacity: 0.7 !important;
+            stroke-width: 2px !important;
+        }
+        
+        /* 桥梁节点标签 - 更醒目 */
+        .bridge-label {
+            font-weight: bold !important;
+            font-size: 12px !important;
+            fill: #fef3c7 !important;
+        }
+        
         /* 滚动条 */
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: #475569; border-radius: 2px; }
@@ -182,63 +211,119 @@ D3_TEMPLATE = """
             .attr("viewBox", [0, 0, width, height])
             .call(zoom);
 
+        // 定义桥梁节点发光滤镜
+        const defs = svg.append("defs");
+        const bridgeGlow = defs.append("filter")
+            .attr("id", "bridgeGlow")
+            .attr("x", "-50%")
+            .attr("y", "-50%")
+            .attr("width", "200%")
+            .attr("height", "200%");
+        bridgeGlow.append("feGaussianBlur")
+            .attr("stdDeviation", "4")
+            .attr("result", "coloredBlur");
+        const feMerge = bridgeGlow.append("feMerge");
+        feMerge.append("feMergeNode").attr("in", "coloredBlur");
+        feMerge.append("feMergeNode").attr("in", "SourceGraphic");
+
         const g = svg.append("g");
 
-        // 力导向模拟
-        const simulation = d3.forceSimulation(data.nodes)
-            .force("link", d3.forceLink(data.links).id(d => d.id).distance(100))
-            .force("charge", d3.forceManyBody().strength(-300))
-            .force("center", d3.forceCenter(width / 2, height / 2))
-            .force("collide", d3.forceCollide().radius(d => (config[d.group]?.radius || 20) + 5).iterations(2));
+        // 辅助函数：计算桥梁节点的额外半径
+        function getBridgeBonus(d) {
+            if (d.group === "document") return 0;
+            const docCount = d.docCount || 0;
+            if (docCount >= 3) return 12;  // 连接3+文献：大幅增大
+            if (docCount >= 2) return 8;   // 连接2文献：中等增大
+            return 0;
+        }
 
-        // 连线
+        // 力导向模拟 - 桥梁节点受到更强的向心力
+        const simulation = d3.forceSimulation(data.nodes)
+            .force("link", d3.forceLink(data.links).id(d => d.id).distance(d => {
+                // 桥梁边距离稍短，让相关节点更紧凑
+                return d.isBridge ? 80 : 100;
+            }))
+            .force("charge", d3.forceManyBody().strength(d => {
+                // 桥梁节点斥力更小，更容易聚拢
+                const docCount = d.docCount || 0;
+                return docCount >= 2 ? -200 : -300;
+            }))
+            .force("center", d3.forceCenter(width / 2, height / 2))
+            .force("collide", d3.forceCollide().radius(d => {
+                const baseRadius = config[d.group]?.radius || 20;
+                return baseRadius + getBridgeBonus(d) + 8;
+            }).iterations(2))
+            // 桥梁节点受到额外的向心力
+            .force("bridgeCenter", d3.forceRadial(0, width / 2, height / 2).strength(d => {
+                const docCount = d.docCount || 0;
+                return docCount >= 2 ? 0.05 : 0;
+            }));
+
+        // 连线 - 区分普通边和桥梁边
         const link = g.append("g")
             .selectAll("line")
             .data(data.links)
             .join("line")
-            .attr("class", "link")
-            .attr("stroke-width", d => Math.sqrt(d.value || 1));
+            .attr("class", d => d.isBridge ? "link bridge-link" : "link")
+            .attr("stroke-width", d => d.isBridge ? 2.5 : Math.sqrt(d.value || 1));
 
-        // 节点组
+        // 节点组 - 为桥梁节点添加特殊类
         const node = g.append("g")
             .selectAll("g")
             .data(data.nodes)
             .join("g")
-            .attr("class", "node")
+            .attr("class", d => {
+                const docCount = d.docCount || 0;
+                return docCount >= 2 ? "node bridge-node" : "node";
+            })
             .call(d3.drag()
                 .on("start", dragstarted)
                 .on("drag", dragged)
                 .on("end", dragended))
             .on("click", (e, d) => showDetails(d));
 
+        // 桥梁节点外层发光效果
+        node.filter(d => (d.docCount || 0) >= 2)
+            .append("circle")
+            .attr("class", "bridge-glow")
+            .attr("r", d => (config[d.group]?.radius || 10) + getBridgeBonus(d) + 10)
+            .attr("fill", "#fbbf24")
+            .attr("opacity", 0.3)
+            .attr("filter", "url(#bridgeGlow)");
+
         // 节点光晕
         node.append("circle")
             .attr("class", "halo")
-            .attr("r", d => (config[d.group]?.radius || 10) + 4)
-            .attr("fill", d => config[d.group]?.color || "#ccc")
-            .attr("opacity", 0.2);
+            .attr("r", d => (config[d.group]?.radius || 10) + getBridgeBonus(d) + 4)
+            .attr("fill", d => (d.docCount || 0) >= 2 ? "#fbbf24" : (config[d.group]?.color || "#ccc"))
+            .attr("opacity", d => (d.docCount || 0) >= 2 ? 0.4 : 0.2);
 
-        // 节点实体
+        // 节点实体 - 桥梁节点更大
         node.append("circle")
-            .attr("r", d => config[d.group]?.radius || 10)
+            .attr("r", d => (config[d.group]?.radius || 10) + getBridgeBonus(d))
             .attr("fill", d => config[d.group]?.color || "#ccc")
-            .attr("stroke", "#fff")
-            .attr("stroke-width", 1.5);
+            .attr("stroke", d => (d.docCount || 0) >= 2 ? "#fbbf24" : "#fff")
+            .attr("stroke-width", d => (d.docCount || 0) >= 2 ? 3 : 1.5);
 
         // 节点图标
         node.append("text")
             .text(d => config[d.group]?.icon || "")
             .attr("dy", "0.35em")
             .attr("text-anchor", "middle")
-            .style("font-size", d => ((config[d.group]?.radius || 10) * 0.7) + "px");
+            .style("font-size", d => (((config[d.group]?.radius || 10) + getBridgeBonus(d)) * 0.7) + "px");
 
-        // 节点标签 - 明确设置浅色填充
+        // 节点标签 - 桥梁节点标签更醒目
         node.append("text")
-            .text(d => d.label.length > 20 ? d.label.substring(0, 20) + "..." : d.label)
-            .attr("x", d => (config[d.group]?.radius || 10) + 8)
+            .attr("class", d => (d.docCount || 0) >= 2 ? "bridge-label" : "")
+            .text(d => {
+                const maxLen = (d.docCount || 0) >= 2 ? 30 : 20;  // 桥梁节点显示更长标签
+                return d.label.length > maxLen ? d.label.substring(0, maxLen) + "..." : d.label;
+            })
+            .attr("x", d => (config[d.group]?.radius || 10) + getBridgeBonus(d) + 8)
             .attr("y", 4)
-            .attr("fill", "#e2e8f0")
-            .style("text-shadow", "0 1px 4px rgba(0,0,0,0.9)");
+            .attr("fill", d => (d.docCount || 0) >= 2 ? "#fef3c7" : "#e2e8f0")
+            .style("text-shadow", "0 1px 4px rgba(0,0,0,0.9)")
+            .style("font-weight", d => (d.docCount || 0) >= 2 ? "bold" : "normal");
 
         simulation.on("tick", () => {
             link
@@ -500,6 +585,49 @@ D3_TEMPLATE = """
 </html>
 """
 
+
+def find_bridging_entity_types(nx_graph: nx.Graph) -> list:
+    """
+    查找连接2个或以上文献节点的实体类型
+    
+    用于"文献关联"按钮，显示能把多个文献连接起来的实体节点
+    
+    Args:
+        nx_graph: NetworkX 图
+        
+    Returns:
+        包含能连接多文献的实体类型列表
+    """
+    if not nx_graph or nx_graph.number_of_nodes() == 0:
+        return []
+    
+    # 收集所有文献节点的 ID
+    doc_node_ids = set()
+    for node_id, attrs in nx_graph.nodes(data=True):
+        if attrs.get("node_type") == "document":
+            doc_node_ids.add(node_id)
+    
+    # 找出连接2个或以上文献的实体节点
+    bridging_types = set()
+    
+    for node_id, attrs in nx_graph.nodes(data=True):
+        node_type = attrs.get("node_type", "")
+        if node_type == "document":
+            continue  # 跳过文献节点本身
+        
+        # 检查这个实体连接了多少个文献
+        connected_docs = set()
+        for neighbor in nx_graph.neighbors(node_id):
+            if neighbor in doc_node_ids:
+                connected_docs.add(neighbor)
+        
+        # 如果连接了2个或以上文献，记录其类型
+        if len(connected_docs) >= 2:
+            bridging_types.add(node_type)
+    
+    return list(bridging_types)
+
+
 def nx_graph_to_d3_data(nx_graph: nx.Graph) -> Dict[str, Any]:
     data = {"nodes": [], "links": []}
     if not nx_graph: return data
@@ -556,7 +684,7 @@ def render_graph_in_streamlit(nx_graph: nx.Graph, height: int = 750, key: str = 
     st.session_state[filter_key] = selected_types
     
     # 快捷按钮
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         if st.button("📄 仅文档", key=f"{key}_only_doc", use_container_width=True):
             st.session_state[filter_key] = ["document"]
@@ -566,14 +694,53 @@ def render_graph_in_streamlit(nx_graph: nx.Graph, height: int = 750, key: str = 
             st.session_state[filter_key] = ["document", "keyword", "method"]
             st.rerun()
     with col3:
+        # 新增：显示文献关联按钮 - 找出连接多个文献的实体节点
+        if st.button("📎 文献关联", key=f"{key}_doc_links", use_container_width=True):
+            # 查找连接2个或以上文献节点的实体
+            bridging_types = find_bridging_entity_types(nx_graph)
+            st.session_state[filter_key] = ["document"] + bridging_types
+            st.rerun()
+    with col4:
         if st.button("🌐 显示全部", key=f"{key}_show_all", use_container_width=True):
             st.session_state[filter_key] = all_types
             st.rerun()
     
     st.markdown("---")
     
-    # 过滤节点和边
-    d3_data = nx_graph_to_d3_data_filtered(nx_graph, selected_types)
+    # Top-N 节点数量限制滑块
+    st.markdown("**🔢 节点数量限制** - 控制显示的核心节点数量")
+    
+    # 计算当前可显示的实体节点数
+    total_entity_count = sum(1 for _, attrs in nx_graph.nodes(data=True) 
+                             if attrs.get("node_type", "keyword") in selected_types 
+                             and attrs.get("node_type") != "document")
+    
+    # 设置滑块的最大值为实际实体数量和500之间的较小值
+    max_limit = min(total_entity_count, 500) if total_entity_count > 0 else 100
+    default_limit = min(100, max_limit)
+    
+    # 使用 session state 保存 Top-N 限制
+    topn_key = f"{key}_topn_limit"
+    if topn_key not in st.session_state:
+        st.session_state[topn_key] = default_limit
+    
+    top_n_limit = st.slider(
+        "显示 Top N 核心节点",
+        min_value=20,
+        max_value=max(max_limit, 20),  # 确保最大值不小于最小值
+        value=min(st.session_state[topn_key], max_limit) if max_limit >= 20 else 20,
+        step=10,
+        key=f"{key}_topn_slider",
+        help="根据节点的连接数(degree)筛选，仅显示连接数最高的 Top N 个实体节点。文档节点始终保留。"
+    )
+    st.session_state[topn_key] = top_n_limit
+    
+    st.caption(f"💡 当前共有 {total_entity_count} 个实体节点，将显示 Degree 最高的 {min(top_n_limit, total_entity_count)} 个")
+    
+    st.markdown("---")
+    
+    # 过滤节点和边（带 Top-N 限制）
+    d3_data = nx_graph_to_d3_data_filtered(nx_graph, selected_types, top_n_limit)
     
     if not d3_data["nodes"]:
         st.warning("当前过滤条件下没有节点，请选择更多节点类型。")
@@ -600,42 +767,91 @@ def render_graph_in_streamlit(nx_graph: nx.Graph, height: int = 750, key: str = 
     components.html(html_content, height=height, scrolling=False)
 
 
-def nx_graph_to_d3_data_filtered(nx_graph: nx.Graph, selected_types: list) -> Dict[str, Any]:
+def nx_graph_to_d3_data_filtered(nx_graph: nx.Graph, selected_types: list, top_n_limit: int = 100) -> Dict[str, Any]:
     """
-    将 NetworkX 图转换为 D3.js 数据格式，支持按节点类型过滤
+    将 NetworkX 图转换为 D3.js 数据格式，支持按节点类型过滤和 Top-N 限制
+    
+    增强功能：计算每个实体节点连接的文献数量(docCount)，用于识别和高亮桥梁节点
     
     Args:
         nx_graph: NetworkX 图
         selected_types: 要显示的节点类型列表
+        top_n_limit: 要显示的实体节点数量上限（文档节点始终保留）
         
     Returns:
-        过滤后的 D3 数据字典
+        过滤后的 D3 数据字典，包含 docCount 属性
     """
     data = {"nodes": [], "links": []}
     if not nx_graph:
         return data
     
-    # 收集符合条件的节点 ID
-    valid_node_ids = set()
+    # 首先收集所有文档节点的 ID
+    doc_node_ids = set()
+    for node_id, attrs in nx_graph.nodes(data=True):
+        if attrs.get("node_type") == "document":
+            doc_node_ids.add(node_id)
+    
+    # 分离文档节点和实体节点
+    doc_nodes = []
+    entity_nodes = []
     
     for node_id, attrs in nx_graph.nodes(data=True):
         node_type = attrs.get("node_type", "keyword")
-        if node_type in selected_types:
-            data["nodes"].append({
-                "id": str(node_id),
-                "label": attrs.get("label", str(node_id)),
-                "group": node_type,
-                "degree": nx_graph.degree(node_id)
-            })
-            valid_node_ids.add(str(node_id))
+        if node_type not in selected_types:
+            continue  # 跳过未选中类型的节点
+        
+        # 计算该节点连接的文献数量
+        connected_doc_count = 0
+        if node_type != "document":
+            for neighbor in nx_graph.neighbors(node_id):
+                if neighbor in doc_node_ids:
+                    connected_doc_count += 1
+        
+        node_data = {
+            "id": str(node_id),
+            "label": attrs.get("label", str(node_id)),
+            "group": node_type,
+            "degree": nx_graph.degree(node_id),
+            "docCount": connected_doc_count  # 连接的文献数量
+        }
+        
+        if node_type == "document":
+            doc_nodes.append(node_data)
+        else:
+            entity_nodes.append(node_data)
     
-    # 只保留两端都在有效节点中的边
+    # 按 degree 降序排序实体节点，取 Top-N
+    # 优先保留桥梁节点（连接多个文献的节点）
+    entity_nodes.sort(key=lambda x: (x["docCount"], x["degree"]), reverse=True)
+    top_entity_nodes = entity_nodes[:top_n_limit]
+    
+    # 合并文档节点和 Top-N 实体节点
+    data["nodes"] = doc_nodes + top_entity_nodes
+    
+    # 收集有效节点 ID 和节点信息映射
+    valid_node_ids = {node["id"] for node in data["nodes"]}
+    node_info_map = {node["id"]: node for node in data["nodes"]}
+    
+    # 只保留两端都在有效节点中的边，并标记桥梁边
     for u, v, attrs in nx_graph.edges(data=True):
-        if str(u) in valid_node_ids and str(v) in valid_node_ids:
+        u_str, v_str = str(u), str(v)
+        if u_str in valid_node_ids and v_str in valid_node_ids:
+            # 检查是否是桥梁节点与文献的连接
+            u_info = node_info_map.get(u_str, {})
+            v_info = node_info_map.get(v_str, {})
+            
+            is_bridge_link = False
+            # 如果一端是文献，另一端是连接>=2文献的实体，则标记为桥梁边
+            if u_info.get("group") == "document" and v_info.get("docCount", 0) >= 2:
+                is_bridge_link = True
+            elif v_info.get("group") == "document" and u_info.get("docCount", 0) >= 2:
+                is_bridge_link = True
+            
             data["links"].append({
-                "source": str(u),
-                "target": str(v),
-                "value": attrs.get("weight", 1)
+                "source": u_str,
+                "target": v_str,
+                "value": attrs.get("weight", 1),
+                "isBridge": is_bridge_link  # 标记桥梁边
             })
     
     return data
@@ -858,12 +1074,13 @@ def render_graph_statistics(stats: Dict[str, Any]) -> None:
         </div>
     """ if methods_html else ""
     
-    datasets_section = f"""
-        <div style="flex:1;">
-            <div class="section-title">📊 数据集 (Datasets)</div>
-            <div class="tag-container">{datasets_html}</div>
-        </div>
-    """ if datasets_html else ""
+    # [REMOVED] 数据集部分已删除 - 如需恢复，取消以下注释：
+    # datasets_section = f"""
+    #     <div style="flex:1;">
+    #         <div class="section-title">📊 数据集 (Datasets)</div>
+    #         <div class="tag-container">{datasets_html}</div>
+    #     </div>
+    # """ if datasets_html else ""
     
     fields_section = f"""
         <div style="flex:1;">
@@ -872,18 +1089,19 @@ def render_graph_statistics(stats: Dict[str, Any]) -> None:
         </div>
     """ if fields_html else ""
     
-    # 两列布局只在有内容时显示
+    # 两列布局只在有内容时显示（已移除数据集）
     two_column_content = ""
-    if methods_section or datasets_section:
+    if methods_section or fields_section:
         two_column_content = f"""
         <div class="two-column">
             {methods_section}
-            {datasets_section}
+            {fields_section}
         </div>
         """
     
     # 只在有内容时显示核心实体详情区块
-    if keywords_section or two_column_content or fields_section:
+    # 注意：fields_section 已经包含在 two_column_content 中，不要重复渲染
+    if keywords_section or two_column_content:
         content_html = f"""
         <!DOCTYPE html>
         <html>
@@ -901,7 +1119,6 @@ def render_graph_statistics(stats: Dict[str, Any]) -> None:
             <div class="kg-stats-container">
                 {keywords_section}
                 {two_column_content}
-                {fields_section}
             </div>
         </body>
         </html>
