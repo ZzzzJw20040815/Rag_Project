@@ -237,35 +237,44 @@ D3_TEMPLATE = """
             return 0;
         }
 
-        // 力导向模拟 - 桥梁节点受到更强的向心力
+        // [修改] 力导向模拟 - 优化布局逻辑
         const simulation = d3.forceSimulation(data.nodes)
             .force("link", d3.forceLink(data.links).id(d => d.id).distance(d => {
-                // 桥梁边距离稍短，让相关节点更紧凑
-                return d.isBridge ? 80 : 100;
+                // 策略：差异化连线长度
+                // 1. 桥梁边 (isBridge=true) 设长 (180)，让文献簇之间保持距离
+                // 2. 普通边设短 (60)，让它们紧贴所属文献
+                return d.isBridge ? 180 : 60;
             }))
             .force("charge", d3.forceManyBody().strength(d => {
-                // 桥梁节点斥力更小，更容易聚拢
-                const docCount = d.docCount || 0;
-                return docCount >= 2 ? -200 : -300;
+                // 策略：增强斥力，防止重叠
+                // 文献节点斥力极大 (-1000)，作为锚点撑开布局
+                if (d.group === 'document') return -1000;
+                // 桥梁节点斥力较大 (-400)
+                if ((d.docCount || 0) >= 2) return -400;
+                // 普通节点标准斥力 (-200)
+                return -200;
             }))
-            .force("center", d3.forceCenter(width / 2, height / 2))
+            .force("center", d3.forceCenter(width / 2, height / 2).strength(0.05)) // 减弱中心引力
             .force("collide", d3.forceCollide().radius(d => {
+                // 碰撞检测，防止重叠
                 const baseRadius = config[d.group]?.radius || 20;
-                return baseRadius + getBridgeBonus(d) + 8;
-            }).iterations(2))
-            // 桥梁节点受到额外的向心力
-            .force("bridgeCenter", d3.forceRadial(0, width / 2, height / 2).strength(d => {
-                const docCount = d.docCount || 0;
-                return docCount >= 2 ? 0.05 : 0;
-            }));
+                const extraSpace = (d.docCount || 0) >= 2 ? 30 : 10;
+                return baseRadius + getBridgeBonus(d) + extraSpace;
+            }).iterations(3))
+            .force("x", d3.forceX(width / 2).strength(0.01))
+            .force("y", d3.forceY(height / 2).strength(0.01));
+        // 注意：移除了原本的 .force("bridgeCenter", ...)
 
-        // 连线 - 区分普通边和桥梁边
+        // [修改] 连线样式优化
         const link = g.append("g")
             .selectAll("line")
             .data(data.links)
             .join("line")
             .attr("class", d => d.isBridge ? "link bridge-link" : "link")
-            .attr("stroke-width", d => d.isBridge ? 2.5 : Math.sqrt(d.value || 1));
+            // 普通边更细(0.8)，桥梁边保持粗细(2.0)
+            .attr("stroke-width", d => d.isBridge ? 2.0 : 0.8)
+            // 普通边透明度大幅降低(0.2)，减少视觉噪音
+            .attr("stroke-opacity", d => d.isBridge ? 0.8 : 0.2);
 
         // 节点组 - 为桥梁节点添加特殊类
         const node = g.append("g")
@@ -312,18 +321,21 @@ D3_TEMPLATE = """
             .attr("text-anchor", "middle")
             .style("font-size", d => (((config[d.group]?.radius || 10) + getBridgeBonus(d)) * 0.7) + "px");
 
-        // 节点标签 - 桥梁节点标签更醒目
+        // [修改] 标签显示策略
         node.append("text")
             .attr("class", d => (d.docCount || 0) >= 2 ? "bridge-label" : "")
             .text(d => {
-                const maxLen = (d.docCount || 0) >= 2 ? 30 : 20;  // 桥梁节点显示更长标签
+                // 桥梁节点显示更长的名字
+                const maxLen = (d.docCount || 0) >= 2 ? 30 : 15;
                 return d.label.length > maxLen ? d.label.substring(0, maxLen) + "..." : d.label;
             })
             .attr("x", d => (config[d.group]?.radius || 10) + getBridgeBonus(d) + 8)
             .attr("y", 4)
-            .attr("fill", d => (d.docCount || 0) >= 2 ? "#fef3c7" : "#e2e8f0")
+            .attr("fill", d => (d.docCount || 0) >= 2 ? "#fef3c7" : "#cbd5e1") // 普通文字调暗
             .style("text-shadow", "0 1px 4px rgba(0,0,0,0.9)")
-            .style("font-weight", d => (d.docCount || 0) >= 2 ? "bold" : "normal");
+            .style("font-weight", d => (d.docCount || 0) >= 2 ? "bold" : "normal")
+            .style("font-size", d => (d.docCount || 0) >= 2 ? "12px" : "10px") // 普通文字变小
+            .style("pointer-events", "none");
 
         simulation.on("tick", () => {
             link

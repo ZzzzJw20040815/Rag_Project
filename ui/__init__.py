@@ -6,6 +6,13 @@ UI 组件模块
 import re
 import streamlit as st
 
+# 引用溯源模块
+from ui.source_view import (
+    render_chat_answer_with_sources,
+    render_source_panel,
+    get_citation_css
+)
+
 
 def parse_table_alignment(separator_row: str) -> list:
     """
@@ -319,13 +326,10 @@ def render_chat_qa_item(chat: dict, index: int, is_latest: bool = False):
     with st.chat_message("user", avatar="🧑"):
         st.markdown(question)
     
-    # 使用原生 st.chat_message 渲染回答
+    # 使用原生 st.chat_message 渲染回答（使用引用溯源组件）
     with st.chat_message("assistant", avatar="🤖"):
-        st.markdown(answer)
-        
-        # 在助手消息内部显示引用来源（使用 expander 折叠）
-        if sources:
-            render_source_documents(sources, use_expander=True)
+        # 使用新的引用溯源渲染函数，将 [doc_X] 转为彩色标签
+        render_chat_answer_with_sources(answer, sources, is_latest=is_latest)
 
 
 def get_custom_css() -> str:

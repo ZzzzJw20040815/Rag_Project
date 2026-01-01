@@ -336,15 +336,41 @@ def main():
             
             # 执行实体提取
             if extract_btn and api_key:
-                with st.spinner("🔍 正在使用 AI 提取文档实体..."):
+                # 使用 st.status 显示实时进度
+                with st.status("🔍 正在使用 AI 提取文档实体...", expanded=True) as status:
+                    progress_container = st.empty()
+                    progress_messages = []
+                    
+                    def progress_callback(message: str, level: str):
+                        """接收进度更新并显示在 UI 上"""
+                        # 根据 level 设置样式
+                        if level == "file":
+                            styled_msg = f"**{message}**"
+                        elif level == "success":
+                            styled_msg = f"✅ {message}"
+                        elif level == "error":
+                            styled_msg = f"⚠️ {message}"
+                        else:
+                            styled_msg = message
+                        
+                        progress_messages.append(styled_msg)
+                        # 只显示最近 10 条消息，避免过长
+                        recent_messages = progress_messages[-10:]
+                        progress_container.markdown("\n\n".join(recent_messages))
+                    
                     try:
                         # 创建实体提取器
                         extractor = EntityExtractor(api_key=api_key)
                         
-                        # 从 chunks 中提取实体
+                        # 从 chunks 中提取实体，传入进度回调
                         extraction_results = extractor.extract_from_documents(
-                            st.session_state.processed_chunks
+                            st.session_state.processed_chunks,
+                            progress_callback=progress_callback
                         )
+                        
+                        # 更新状态为构建图谱
+                        status.update(label="📊 正在构建知识图谱...", state="running")
+                        progress_callback("📊 正在构建知识图谱...", "info")
                         
                         # 构建知识图谱
                         st.session_state.knowledge_graph = KnowledgeGraph()
@@ -356,10 +382,20 @@ def main():
                         st.session_state.knowledge_graph.save()
                         st.session_state.entities_extracted = True
                         
-                        st.success(f"✅ 成功提取 {len(extraction_results)} 个文档的实体！")
+                        # 完成状态
+                        total_entities = sum(
+                            sum(len(v) for v in entities.values())
+                            for entities in extraction_results.values()
+                        )
+                        status.update(
+                            label=f"✅ 完成！成功从 {len(extraction_results)} 个文档提取 {total_entities} 个实体",
+                            state="complete",
+                            expanded=False
+                        )
                         st.rerun()
                         
                     except Exception as e:
+                        status.update(label="❌ 实体提取失败", state="error")
                         st.error(f"❌ 实体提取失败: {str(e)}")
             
             # 显示知识图谱

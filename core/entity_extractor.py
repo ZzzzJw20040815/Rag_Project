@@ -171,7 +171,8 @@ class EntityExtractor:
     def extract_from_documents(
         self,
         documents: List[Document],
-        aggregate_by_file: bool = True
+        aggregate_by_file: bool = True,
+        progress_callback: Optional[callable] = None
     ) -> Dict[str, Dict[str, List[str]]]:
         """
         从文档列表中提取实体（优化版）
@@ -179,9 +180,21 @@ class EntityExtractor:
         优化策略：
         1. 合并片段：每 4 个片段合并为 1 个超级片段
         2. 并行调用：使用 batch() 并发发送请求
+        
+        Args:
+            documents: 文档列表
+            aggregate_by_file: 是否按文件聚合
+            progress_callback: 进度回调函数，接收 (message: str, level: str) 参数
+                              level 可以是 "file", "info", "batch", "success", "error"
         """
         if not documents:
             return {}
+        
+        def report(message: str, level: str = "info"):
+            """报告进度，同时打印到控制台和回调"""
+            print(message)
+            if progress_callback:
+                progress_callback(message, level)
         
         # 按文件分组
         file_docs = {}
@@ -193,15 +206,15 @@ class EntityExtractor:
         
         results = {}
         
-        for source_file, docs in file_docs.items():
+        for file_idx, (source_file, docs) in enumerate(file_docs.items()):
             start_time = time.time()
             total_chunks = len(docs)
             
             # 获取分组后的片段
             chunk_batches = self._select_representative_chunks(docs)
             
-            print(f"📄 分析: {source_file}")
-            print(f"   📊 总页数: {total_chunks} | 采样片段: {sum(len(b) for b in chunk_batches)} | 合并为 {len(chunk_batches)} 批")
+            report(f"📄 分析: {source_file}", "file")
+            report(f"   📊 总页数: {total_chunks} | 采样片段: {sum(len(b) for b in chunk_batches)} | 合并为 {len(chunk_batches)} 批", "info")
             
             # 构建所有 prompts
             all_prompts = []
@@ -209,7 +222,7 @@ class EntityExtractor:
                 merged_text = self._merge_chunks(batch)
                 prompt = ENTITY_EXTRACTION_PROMPT.format(
                     text=merged_text,
-                    max_keywords=8,  # 合并片段后可以多提取一些
+                    max_keywords=8,
                     max_methods=6,
                     max_fields=4,
                     max_datasets=4,
@@ -220,16 +233,15 @@ class EntityExtractor:
             # 实体聚合器
             aggregator = {k: Counter() for k in ["keywords", "methods", "fields", "datasets", "applications"]}
             
-            # 分批并行调用（每批最多 MAX_CONCURRENT_REQUESTS 个请求）
+            # 分批并行调用
             for i in range(0, len(all_prompts), MAX_CONCURRENT_REQUESTS):
                 batch_prompts = all_prompts[i:i + MAX_CONCURRENT_REQUESTS]
                 batch_num = i // MAX_CONCURRENT_REQUESTS + 1
                 total_batches = (len(all_prompts) + MAX_CONCURRENT_REQUESTS - 1) // MAX_CONCURRENT_REQUESTS
                 
-                print(f"   🚀 并行请求批次 {batch_num}/{total_batches} ({len(batch_prompts)} 个请求)...")
+                report(f"   🚀 并行请求批次 {batch_num}/{total_batches} ({len(batch_prompts)} 个请求)...", "batch")
                 
                 try:
-                    # 使用 LangChain 的 batch() 方法并发调用
                     responses = self.llm.batch(batch_prompts)
                     
                     for response in responses:
@@ -238,8 +250,7 @@ class EntityExtractor:
                             aggregator[key].update(chunk_result.get(key, []))
                             
                 except Exception as e:
-                    print(f"   ⚠️ 批次 {batch_num} 部分失败: {str(e)[:50]}")
-                    # 降级：逐个请求
+                    report(f"   ⚠️ 批次 {batch_num} 部分失败: {str(e)[:50]}", "error")
                     for prompt in batch_prompts:
                         try:
                             response = self.llm.invoke(prompt)
@@ -259,9 +270,8 @@ class EntityExtractor:
             elapsed = time.time() - start_time
             results[source_file] = final_entities
             
-            # 统计信息
             entity_count = sum(len(v) for v in final_entities.values())
-            print(f"   ✅ 完成！耗时 {elapsed:.1f}s | 提取 {entity_count} 个实体")
+            report(f"   ✅ 完成！耗时 {elapsed:.1f}s | 提取 {entity_count} 个实体", "success")
         
         return results
 
